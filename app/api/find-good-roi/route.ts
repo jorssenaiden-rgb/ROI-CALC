@@ -24,12 +24,11 @@ function calcNoiAndCapRate(price: number, monthlyRent: number, annualTax: number
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
 
-  const area = String(body.area ?? "").trim().toLowerCase(); // e.g. "burnaby"
+  const area = String(body.area ?? "").trim().toLowerCase();
   const minPrice = Number(body.minPrice ?? 250000);
   const capRateMin = Number(body.capRateMin ?? 6);
   const limit = Math.min(Number(body.limit ?? 50), 200);
 
-  // Rent rule knobs (optional)
   const rentBase = Number(body.rentBase ?? 1200);
   const rentPerBed = Number(body.rentPerBed ?? 700);
   const rentFallbackBeds = Number(body.rentFallbackBeds ?? 2);
@@ -46,8 +45,8 @@ export async function POST(req: Request) {
       const price = r.Price_Listing ?? null;
       if (!price) return null;
 
-      const estRent = estimateMonthlyRent(r.Bed, rentBase, rentPerBed, rentFallbackBeds);
-      const { noiAnnual, capRate } = calcNoiAndCapRate(price, estRent, r.Property_Tax);
+      const estimatedRent = estimateMonthlyRent(r.Bed, rentBase, rentPerBed, rentFallbackBeds);
+      const { noiAnnual, capRate } = calcNoiAndCapRate(price, estimatedRent, r.Property_Tax);
 
       return {
         Location: r.Location,
@@ -57,7 +56,7 @@ export async function POST(req: Request) {
         Property_Tax: r.Property_Tax,
         Bed: r.Bed,
         Bath: r.Bath,
-        estimatedRent: estRent,
+        estimatedRent,
         noiAnnual,
         capRate,
         meetsTarget: (capRate ?? -Infinity) >= capRateMin,
@@ -66,7 +65,6 @@ export async function POST(req: Request) {
     .filter(Boolean)
     .sort((a: any, b: any) => (b.capRate ?? -Infinity) - (a.capRate ?? -Infinity));
 
-  // "Good ROI" first (>= capRateMin), but still include others if you want:
   const good = analyzed.filter((x: any) => x.meetsTarget).slice(0, limit);
 
   return Response.json({
