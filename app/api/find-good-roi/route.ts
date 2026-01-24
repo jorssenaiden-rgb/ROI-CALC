@@ -44,7 +44,7 @@ export async function POST(req: Request) {
     page.setDefaultTimeout(30000);
 
     const apiCalls: { method: string; url: string }[] = [];
-    page.on("request", (req) => {
+    page.on("request", (req: any) => {
       const rt = req.resourceType();
       if (rt === "xhr" || rt === "fetch") apiCalls.push({ method: req.method(), url: req.url() });
     });
