@@ -1,215 +1,80 @@
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+import { loadListings } from "@/lib/loadListings";
 
-type Output = {
-  ok: boolean;
-  searched: string;
-  debug: {
-    inputFound: boolean;
-    suggestionFound: boolean;
-    searchClicked: boolean;
-    listingsFound: number;
-    htmlTitle?: string | null;
-    url?: string | null;
-  };
-  listings: Array<{
-    url: string;
-    text: string;
-  }>;
-  apiCalls: Array<{ method: string; url: string }>;
-  error?: string;
-};
+function estimateMonthlyRent(beds: number | null, base = 1200, perBed = 700, fallbackBeds = 2) {
+  const b = beds ?? fallbackBeds;
+  return Math.max(0, Math.round(base + b * perBed));
+}
 
-function clean(s: any) {
-  return String(s ?? "").replace(/\s+/g, " ").trim();
+function calcNoiAndCapRate(price: number, monthlyRent: number, annualTax: number | null) {
+  const grossAnnual = monthlyRent * 12;
+
+  const propTaxAnnual = annualTax ?? price * 0.012;
+  const insuranceAnnual = 1200;
+  const maintAnnual = price * 0.01;
+  const vacancyAnnual = grossAnnual * 0.05;
+  const mgmtAnnual = grossAnnual * 0.08;
+
+  const expenses = propTaxAnnual + insuranceAnnual + maintAnnual + vacancyAnnual + mgmtAnnual;
+  const noiAnnual = grossAnnual - expenses;
+  const capRate = price > 0 ? (noiAnnual / price) * 100 : null;
+
+  return { noiAnnual, capRate };
 }
 
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
-  const searchText = String(body.location ?? "Greater Vancouver").trim();
 
-  let browser: any = null;
+  const area = String(body.area ?? "").trim().toLowerCase(); // e.g. "burnaby"
+  const minPrice = Number(body.minPrice ?? 250000);
+  const capRateMin = Number(body.capRateMin ?? 6);
+  const limit = Math.min(Number(body.limit ?? 50), 200);
 
-  try {
-    // ✅ dynamic import (prevents bundling/runtime issues)
-    const { chromium } = await import("playwright");
+  // Rent rule knobs (optional)
+  const rentBase = Number(body.rentBase ?? 1200);
+  const rentPerBed = Number(body.rentPerBed ?? 700);
+  const rentFallbackBeds = Number(body.rentFallbackBeds ?? 2);
 
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage({
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-      locale: "en-CA",
-    });
+  const listings = loadListings();
 
-    page.setDefaultTimeout(30000);
+  const analyzed = listings
+    .filter((r) => (r.Price_Listing ?? 0) >= minPrice)
+    .filter((r) => {
+      if (!area) return true;
+      return String(r.Location ?? "").toLowerCase().includes(area);
+    })
+    .map((r) => {
+      const price = r.Price_Listing ?? null;
+      if (!price) return null;
 
-    const apiCalls: { method: string; url: string }[] = [];
-    page.on("request", (req: any) => {
-      const rt = req.resourceType();
-      if (rt === "xhr" || rt === "fetch") apiCalls.push({ method: req.method(), url: req.url() });
-    });
-console.log("Fetched URL:", url);
-console.log("HTML length:", html?.length ?? 0);
-console.log("HTML title:", cheerio.load(html ?? "")("title").text());
+      const estRent = estimateMonthlyRent(r.Bed, rentBase, rentPerBed, rentFallbackBeds);
+      const { noiAnnual, capRate } = calcNoiAndCapRate(price, estRent, r.Property_Tax);
 
-    const START_URL = "https://explore.communities.ca/LKP9GY/buy";
-    await page.goto(START_URL, { waitUntil: "domcontentloaded" });
+      return {
+        Location: r.Location,
+        Property_Type: r.Property_Type,
+        Price_Listing: price,
+        Property_Sqft: r.Property_Sqft,
+        Property_Tax: r.Property_Tax,
+        Bed: r.Bed,
+        Bath: r.Bath,
+        estimatedRent: estRent,
+        noiAnnual,
+        capRate,
+        meetsTarget: (capRate ?? -Infinity) >= capRateMin,
+      };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => (b.capRate ?? -Infinity) - (a.capRate ?? -Infinity));
 
-    const title = await page.title().catch(() => null);
+  // "Good ROI" first (>= capRateMin), but still include others if you want:
+  const good = analyzed.filter((x: any) => x.meetsTarget).slice(0, limit);
 
-    // find search input
-    const input = page
-      .locator(
-        [
-          'input[placeholder*="city" i]',
-          'input[placeholder*="area" i]',
-          'input[type="search"]',
-          'input[name*="search" i]',
-          'input[id*="search" i]',
-        ].join(",")
-      )
-      .first();
-
-    const inputFound = (await input.count()) > 0;
-    if (!inputFound) {
-      await browser.close();
-      return Response.json({
-        ok: false,
-        searched: searchText,
-        debug: {
-          inputFound: false,
-          suggestionFound: false,
-          searchClicked: false,
-          listingsFound: 0,
-          htmlTitle: title,
-          url: START_URL,
-        },
-        listings: [],
-        apiCalls: dedupe(apiCalls),
-        error: "Could not find the search input. The site UI/markup likely changed.",
-      } satisfies Output);
-    }
-
-    await input.waitFor({ state: "visible" });
-    await input.click();
-    await input.fill(searchText);
-
-    await page.waitForTimeout(700);
-
-    // try to click a suggestion if it exists
-    const suggestion = page
-      .locator(
-        [
-          '[role="listbox"] [role="option"]',
-          '[role="listbox"] li',
-          '[class*="autocomplete" i] li',
-          '[class*="suggest" i] li',
-          `li:has-text("${searchText}")`,
-        ].join(",")
-      )
-      .first();
-
-    const suggestionFound = (await suggestion.count()) > 0;
-
-    if (suggestionFound) {
-      try {
-        await suggestion.click({ timeout: 2000 });
-      } catch {
-        await input.press("ArrowDown");
-        await input.press("Enter");
-      }
-    } else {
-      await input.press("Enter");
-    }
-
-    // click Search button if present
-    const searchButton = page.locator('button:has-text("Search"), a:has-text("Search")').first();
-    let searchClicked = false;
-    if ((await searchButton.count()) > 0) {
-      await searchButton.click();
-      searchClicked = true;
-    } else {
-      await input.press("Enter");
-      searchClicked = true;
-    }
-
-    await page.waitForTimeout(2000);
-
-    // scroll a bit to load more
-    for (let i = 0; i < 4; i++) {
-      await page.mouse.wheel(0, 2500);
-      await page.waitForTimeout(900);
-    }
-
-    // extract listing-like links
-    const listings = await page.evaluate(() => {
-      const anchors = Array.from(document.querySelectorAll("a[href]"));
-      const likely = anchors.filter((a) => {
-        const href = a.getAttribute("href") || "";
-        return (
-          href.includes("/listing") ||
-          href.includes("/property") ||
-          href.includes("/details") ||
-          href.includes("/mls") ||
-          href.includes("ListingId=") ||
-          href.includes("listingId=")
-        );
-      });
-
-      const seen = new Set<string>();
-      const out: Array<{ url: string; text: string }> = [];
-
-      for (const a of likely) {
-        const href = (a as HTMLAnchorElement).href;
-        if (!href || seen.has(href)) continue;
-        seen.add(href);
-
-        const card = a.closest("article, li, div") || a.parentElement;
-        const text = (card?.textContent || a.textContent || "").replace(/\s+/g, " ").trim();
-
-        out.push({ url: href, text });
-      }
-
-      return out;
-    });
-
-    await browser.close();
-
-    return Response.json({
-      ok: true,
-      searched: searchText,
-      debug: {
-        inputFound: true,
-        suggestionFound,
-        searchClicked,
-        listingsFound: listings.length,
-        htmlTitle: title,
-        url: START_URL,
-      },
-      listings: listings.map((x) => ({ url: x.url, text: clean(x.text).slice(0, 500) })),
-      apiCalls: dedupe(apiCalls),
-    } satisfies Output);
-  } catch (e: any) {
-    try {
-      if (browser) await browser.close();
-    } catch {}
-
-    return Response.json({
-      ok: false,
-      searched: searchText,
-      debug: {
-        inputFound: false,
-        suggestionFound: false,
-        searchClicked: false,
-        listingsFound: 0,
-      },
-      listings: [],
-      apiCalls: [],
-      error: String(e?.stack || e?.message || e),
-    } satisfies Output);
-  }
-}
-
-function dedupe(items: Array<{ method: string; url: string }>) {
-  return Array.from(new Map(items.map((x) => [`${x.method} ${x.url}`, x])).values());
+  return Response.json({
+    area: area || null,
+    minPrice,
+    capRateMin,
+    scanned: listings.length,
+    returned: good.length,
+    results: good,
+  });
 }
