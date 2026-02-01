@@ -2,19 +2,65 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Script from "next/script";
+import InvestorControls, { loadAssumptions } from "@/components/InvestorControls";
+import { computeMetrics } from "@/lib/invest";
 
 function money(n) {
   if (n == null || Number.isNaN(Number(n))) return "—";
-  return `$${Number(n).toLocaleString()}`;
+  return `$${Math.round(Number(n)).toLocaleString()}`;
 }
-
+function money2(n) {
+  if (n == null || Number.isNaN(Number(n))) return "—";
+  return `$${Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
 function pct(n) {
   if (n == null || Number.isNaN(Number(n))) return "—";
   return `${Number(n).toFixed(2)}%`;
 }
+function pct1(n) {
+  if (n == null || Number.isNaN(Number(n))) return "—";
+  return `${Number(n).toFixed(1)}%`;
+}
+
+const WATCH_KEY = "investroi_watchlist_v1";
+
+function loadWatchlist() {
+  if (typeof window === "undefined") return [];
+  try {
+    return JSON.parse(localStorage.getItem(WATCH_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+function saveWatchlist(list) {
+  try {
+    localStorage.setItem(WATCH_KEY, JSON.stringify(list));
+  } catch {}
+}
+
+function toCsv(rows) {
+  const escape = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+  const headers = [
+    "address",
+    "price",
+    "beds",
+    "baths",
+    "sqft",
+    "estRent",
+    "capRate",
+    "cashFlowMonthly",
+    "cashOnCashPct",
+    "dscr",
+  ];
+  const lines = [
+    headers.join(","),
+    ...rows.map((r) => headers.map((h) => escape(r[h])).join(",")),
+  ];
+  return lines.join("\n");
+}
 
 export default function OpeningScreen() {
-  // HERO selections (options never filtered)
+  // Hero selections (options never filtered)
   const [heroCountry, setHeroCountry] = useState("Canada");
   const [heroProvince, setHeroProvince] = useState("any");
   const [heroCity, setHeroCity] = useState("any");
@@ -29,30 +75,40 @@ export default function OpeningScreen() {
   const [minCap, setMinCap] = useState(0);
   const [sortBy, setSortBy] = useState("cap");
 
-  // ✅ NEW: Beds/Baths dropdown filters (minimum)
-  const [minBeds, setMinBeds] = useState("any");   // "any" | "0" | "1" | ... | "5"
-  const [minBaths, setMinBaths] = useState("any"); // "any" | "0" | "1" | ... | "5"
+  // Beds/Baths minimum filters
+  const [minBeds, setMinBeds] = useState("any");
+  const [minBaths, setMinBaths] = useState("any");
+
+  // Investor assumptions
+  const [assumptions, setAssumptions] = useState(loadAssumptions());
 
   // Pagination
   const [page, setPage] = useState(1);
   const pageSize = 50;
 
-  // Server results (50 rows only)
+  // Server results (only 50)
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // Full option lists (never filtered by selection)
+  // Full options
   const [provinceOptions, setProvinceOptions] = useState([]);
   const [cityOptions, setCityOptions] = useState([]);
 
-  // Refs
+  // Market summary
+  const [market, setMarket] = useState({ count: 0, avgCapRate: null, avgPrice: null, avgRent: null });
+
+  // Watchlist
+  const [watchlist, setWatchlist] = useState([]);
+  useEffect(() => setWatchlist(loadWatchlist()), []);
+  useEffect(() => saveWatchlist(watchlist), [watchlist]);
+
   const resultsRef = useRef(null);
   const tableTopRef = useRef(null);
 
-  // Plotly
+  // Plotly (current page)
   const plotReadyRef = useRef(false);
   const initOrUpdatePlotly = useCallback((capRates) => {
     const Plotly = typeof window !== "undefined" ? window.Plotly : null;
@@ -77,10 +133,7 @@ export default function OpeningScreen() {
       if (b) b.count += 1;
     }
 
-    const data = [
-      { x: buckets.map((b) => b.label), y: buckets.map((b) => b.count), type: "bar" },
-    ];
-
+    const data = [{ x: buckets.map((b) => b.label), y: buckets.map((b) => b.count), type: "bar" }];
     const layout = {
       margin: { l: 30, r: 10, t: 10, b: 40 },
       height: 230,
@@ -98,22 +151,13 @@ export default function OpeningScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    return () => {
-      try {
-        window.Plotly?.purge?.("roiChart");
-      } catch {}
-    };
-  }, []);
-
-  // Hero handlers (never “stuck”)
+  // Dropdown behavior: always full options; reset city selection when province changes
   const onHeroProvinceChange = (e) => {
     setHeroProvince(e.target.value);
-    setHeroCity("any"); // reset city selection, but options stay full
+    setHeroCity("any");
   };
-  const onHeroCityChange = (e) => setHeroCity(e.target.value);
 
-  // Fetch only current page
+  // Fetch one page
   const fetchPage = useCallback(async () => {
     setLoading(true);
     setErrorMsg("");
@@ -129,8 +173,6 @@ export default function OpeningScreen() {
         sortBy,
         page: String(page),
         pageSize: String(pageSize),
-
-        // ✅ NEW
         minBeds,
         minBaths,
       });
@@ -146,7 +188,6 @@ export default function OpeningScreen() {
       setTotal(Number(data.total || 0));
       setTotalPages(Number(data.totalPages || 1));
 
-      // options should remain full lists
       if (Array.isArray(data.provinceOptions)) setProvinceOptions(data.provinceOptions);
       if (Array.isArray(data.cityOptions)) setCityOptions(data.cityOptions);
 
@@ -159,41 +200,41 @@ export default function OpeningScreen() {
     } finally {
       setLoading(false);
     }
-  }, [
-    query,
-    country,
-    province,
-    city,
-    priceBucket,
-    minCap,
-    sortBy,
-    page,
-    pageSize,
-    minBeds,
-    minBaths,
-  ]);
+  }, [query, country, province, city, priceBucket, minCap, sortBy, page, minBeds, minBaths]);
+
+  // Fetch market summary for selected location (country/province/city)
+  const fetchMarket = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ country, province, city });
+      const res = await fetch(`/api/market-summary?${params.toString()}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setMarket(data);
+    } catch {}
+  }, [country, province, city]);
 
   useEffect(() => {
     fetchPage();
   }, [fetchPage]);
 
-  // Reset to page 1 when any filter changes
+  useEffect(() => {
+    fetchMarket();
+  }, [fetchMarket]);
+
+  // Reset page when filters change
   useEffect(() => {
     setPage(1);
   }, [query, country, province, city, priceBucket, minCap, sortBy, minBeds, minBaths]);
 
-  // Scroll to table top on page change
   useEffect(() => {
     tableTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [page]);
 
-  // Update plotly using current page
   useEffect(() => {
     const capRates = items.map((x) => x?.capRate).filter((v) => v != null);
     initOrUpdatePlotly(capRates);
   }, [items, initOrUpdatePlotly]);
 
-  // Pagination buttons with ellipses
   const pageButtons = useMemo(() => {
     const pages = new Set([1, totalPages, page - 2, page - 1, page, page + 1, page + 2]);
     const arr = Array.from(pages)
@@ -239,6 +280,53 @@ export default function OpeningScreen() {
     setPage(1);
   };
 
+  const toggleSave = (row) => {
+    const key = row.id ?? row.address ?? JSON.stringify(row);
+    const exists = watchlist.find((x) => (x.id ?? x.address) === key);
+    if (exists) {
+      setWatchlist((w) => w.filter((x) => (x.id ?? x.address) !== key));
+    } else {
+      setWatchlist((w) => [{ ...row, _key: key }, ...w].slice(0, 200));
+    }
+  };
+
+  const exportWatchlist = () => {
+    const rows = watchlist.map((x) => ({
+      address: x.address,
+      price: x.price,
+      beds: x.beds,
+      baths: x.baths,
+      sqft: x.sqft,
+      estRent: x.estRent,
+      capRate: x.capRate,
+      cashFlowMonthly: x._metrics?.cashFlowMonthly ?? "",
+      cashOnCashPct: x._metrics?.cashOnCashPct ?? "",
+      dscr: x._metrics?.dscr ?? "",
+    }));
+
+    const csv = toCsv(rows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "watchlist.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Decorate items with investor metrics
+  const viewRows = useMemo(() => {
+    return items.map((x) => {
+      const m = computeMetrics(
+        Number(x.price) || null,
+        Number(x.estRent) || null,
+        Number(x.noi) || null,
+        assumptions
+      );
+      return { ...x, _metrics: m };
+    });
+  }, [items, assumptions]);
+
   return (
     <>
       <link
@@ -259,7 +347,6 @@ export default function OpeningScreen() {
       `}</style>
 
       <div className="text-slate-800">
-        {/* Header */}
         <header className="fixed w-full z-50 bg-white border-b border-slate-200 shadow-sm h-16">
           <div className="container mx-auto px-4 h-full flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -269,6 +356,19 @@ export default function OpeningScreen() {
               <span className="text-xl font-bold tracking-tight text-slate-900">
                 Invest<span className="text-sky-600">ROI</span>
               </span>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={exportWatchlist}
+                className="hidden md:inline-flex px-3 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                title="Export saved deals to CSV"
+              >
+                Export Watchlist ({watchlist.length})
+              </button>
+              <div className="hidden md:block text-xs text-slate-500">
+                Page loads 50 at a time
+              </div>
             </div>
           </div>
         </header>
@@ -291,7 +391,7 @@ export default function OpeningScreen() {
                   Find High Yield <span className="text-sky-400">ROI Properties</span>
                 </h1>
                 <p className="text-slate-300 text-lg">
-                  Analyze cap rates, cash flow, and market trends instantly across thousands of listings.
+                  Investor-grade metrics: cashflow, CoC return, DSCR, and market context.
                 </p>
               </div>
 
@@ -335,7 +435,7 @@ export default function OpeningScreen() {
                     </label>
                     <select
                       value={heroCity}
-                      onChange={onHeroCityChange}
+                      onChange={(e) => setHeroCity(e.target.value)}
                       className="w-full h-11 pl-3 pr-8 bg-slate-50 border border-slate-200 rounded-lg text-sm"
                     >
                       <option value="any">Any</option>
@@ -368,21 +468,51 @@ export default function OpeningScreen() {
 
           {/* RESULTS */}
           <section ref={resultsRef} className="mt-14 container mx-auto px-4 mb-6">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            {/* Investor assumptions */}
+            <div className="mb-4">
+              <InvestorControls value={assumptions} onChange={setAssumptions} />
+            </div>
+
+            {/* Market summary + status */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
               <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
                 <p className="text-xs text-slate-500 uppercase font-semibold">Results</p>
                 <p className="text-2xl font-bold text-slate-800">{loading ? "…" : total}</p>
               </div>
 
+              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                <p className="text-xs text-slate-500 uppercase font-semibold">Market Avg Cap</p>
+                <p className="text-2xl font-bold text-emerald-600">
+                  {market.avgCapRate == null ? "—" : pct1(market.avgCapRate)}
+                </p>
+                <p className="text-xs text-slate-500">For selected area</p>
+              </div>
+
+              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                <p className="text-xs text-slate-500 uppercase font-semibold">Market Avg Price</p>
+                <p className="text-2xl font-bold text-slate-800">
+                  {market.avgPrice == null ? "—" : money2(market.avgPrice)}
+                </p>
+                <p className="text-xs text-slate-500">For selected area</p>
+              </div>
+
+              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                <p className="text-xs text-slate-500 uppercase font-semibold">Market Avg Rent</p>
+                <p className="text-2xl font-bold text-slate-800">
+                  {market.avgRent == null ? "—" : money2(market.avgRent)}
+                </p>
+                <p className="text-xs text-slate-500">For selected area</p>
+              </div>
+
               {errorMsg && (
-                <div className="md:col-span-3 bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
+                <div className="md:col-span-4 bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
                   {errorMsg}
                 </div>
               )}
             </div>
 
             <div className="flex flex-col lg:flex-row gap-6">
-              {/* CHART */}
+              {/* Chart */}
               <div className="w-full lg:w-1/3">
                 <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 h-[300px] flex flex-col">
                   <div className="flex justify-between items-center mb-4">
@@ -393,11 +523,10 @@ export default function OpeningScreen() {
                 </div>
               </div>
 
-              {/* TABLE */}
+              {/* Table + filters */}
               <div className="w-full lg:w-2/3 flex flex-col">
                 <div ref={tableTopRef} />
 
-                {/* CONTROLS */}
                 <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-4">
                   <div className="flex flex-wrap gap-4 items-center justify-between">
                     <div className="flex items-center gap-3 overflow-x-auto">
@@ -422,7 +551,6 @@ export default function OpeningScreen() {
                           className="py-2 pl-2 pr-6 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-700"
                         >
                           <option value="any">Any</option>
-                          <option value="0">0+</option>
                           <option value="1">1+</option>
                           <option value="2">2+</option>
                           <option value="3">3+</option>
@@ -441,7 +569,6 @@ export default function OpeningScreen() {
                           className="py-2 pl-2 pr-6 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-700"
                         >
                           <option value="any">Any</option>
-                          <option value="0">0+</option>
                           <option value="1">1+</option>
                           <option value="2">2+</option>
                           <option value="3">3+</option>
@@ -514,65 +641,103 @@ export default function OpeningScreen() {
                             Config
                           </th>
                           <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">
-                            Est Rent
+                            Cashflow / mo
                           </th>
                           <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">
-                            NOI/yr
+                            CoC
+                          </th>
+                          <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">
+                            DSCR
                           </th>
                           <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right text-sky-600">
                             Cap Rate
+                          </th>
+                          <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-center">
+                            Save
                           </th>
                         </tr>
                       </thead>
 
                       <tbody className="divide-y divide-slate-100">
-                        {items.map((x, idx) => (
-                          <tr key={x.id ?? idx} className="hover:bg-sky-50/30 transition-colors">
-                            <td className="p-4">
-                              <div className="text-sm font-bold text-slate-800">
-                                {x.address || "Unknown address"}
-                              </div>
-                              <div className="text-xs text-slate-500">
-                                {x.sqft ? `${x.sqft} sqft` : "—"}
-                              </div>
-                            </td>
+                        {viewRows.map((x, idx) => {
+                          const m = x._metrics;
+                          const saved = watchlist.some((w) => (w._key ?? (w.id ?? w.address)) === (x.id ?? x.address));
 
-                            <td className="p-4 text-right">
-                              <div className="text-sm font-bold text-slate-800">{money(x.price)}</div>
-                            </td>
+                          const cashflow = m?.cashFlowMonthly;
+                          const cashflowGood = cashflow != null && cashflow > 0;
 
-                            <td className="p-4 text-center">
-                              <div className="text-xs font-medium text-slate-600">
-                                {x.beds != null ? `${x.beds} Beds` : "—"}
-                              </div>
-                              <div className="text-xs text-slate-400">
-                                {x.baths != null ? `${x.baths} Baths` : "—"}
-                              </div>
-                            </td>
-
-                            <td className="p-4 text-right">
-                              <div className="text-sm text-slate-700">{money(x.estRent)}</div>
-                            </td>
-
-                            <td className="p-4 text-right">
-                              <div className="text-sm text-slate-700">{money(x.noi)}</div>
-                            </td>
-
-                            <td className="p-4 text-right">
-                              {x.capRate != null ? (
-                                <div className="inline-flex items-center px-2.5 py-0.5 rounded-full text-sm font-bold bg-green-100 text-green-800">
-                                  {pct(x.capRate)}
+                          return (
+                            <tr key={x.id ?? `${x.address}-${idx}`} className="hover:bg-sky-50/30 transition-colors">
+                              <td className="p-4">
+                                <div className="text-sm font-bold text-slate-800">{x.address || "Unknown address"}</div>
+                                <div className="text-xs text-slate-500">
+                                  {x.sqft ? `${x.sqft} sqft` : "—"} • {x.estRent ? `Rent ${money(x.estRent)}/mo` : "Rent —"}
                                 </div>
-                              ) : (
-                                <div className="text-sm text-slate-400">—</div>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
+                              </td>
 
-                        {items.length === 0 && !loading && (
+                              <td className="p-4 text-right">
+                                <div className="text-sm font-bold text-slate-800">{money(x.price)}</div>
+                                <div className="text-xs text-slate-500">
+                                  {m?.monthlyMortgage != null ? `Pmt ${money(m.monthlyMortgage)}/mo` : "Pmt —"}
+                                </div>
+                              </td>
+
+                              <td className="p-4 text-center">
+                                <div className="text-xs font-medium text-slate-700">{x.beds} Beds</div>
+                                <div className="text-xs text-slate-500">{x.baths} Baths</div>
+                              </td>
+
+                              <td className="p-4 text-right">
+                                <div className={`text-sm font-bold ${cashflowGood ? "text-emerald-600" : "text-slate-700"}`}>
+                                  {cashflow == null ? "—" : money(cashflow)}
+                                </div>
+                                <div className="text-[11px] text-slate-500">
+                                  (vacancy+opex included)
+                                </div>
+                              </td>
+
+                              <td className="p-4 text-right">
+                                <div className="text-sm font-semibold text-slate-800">
+                                  {m?.cashOnCashPct == null ? "—" : pct1(m.cashOnCashPct)}
+                                </div>
+                              </td>
+
+                              <td className="p-4 text-right">
+                                <div className="text-sm font-semibold text-slate-800">
+                                  {m?.dscr == null ? "—" : m.dscr.toFixed(2)}
+                                </div>
+                              </td>
+
+                              <td className="p-4 text-right">
+                                {x.capRate != null ? (
+                                  <div className="inline-flex items-center px-2.5 py-0.5 rounded-full text-sm font-bold bg-green-100 text-green-800">
+                                    {pct(x.capRate)}
+                                  </div>
+                                ) : (
+                                  <div className="text-sm text-slate-400">—</div>
+                                )}
+                              </td>
+
+                              <td className="p-4 text-center">
+                                <button
+                                  onClick={() => toggleSave({ ...x, _metrics: m })}
+                                  className={`px-2 py-1 rounded-lg border text-xs font-semibold ${
+                                    saved
+                                      ? "border-sky-300 bg-sky-50 text-sky-700"
+                                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                                  }`}
+                                  title="Save to watchlist"
+                                >
+                                  {saved ? "Saved" : "Save"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {viewRows.length === 0 && !loading && (
                           <tr>
-                            <td className="p-6 text-sm text-slate-500" colSpan={6}>
+                            <td className="p-6 text-sm text-slate-500" colSpan={8}>
                               No listings match your filters.
                             </td>
                           </tr>
@@ -605,6 +770,27 @@ export default function OpeningScreen() {
                           <i className="fa-solid fa-chevron-left" /> Prev
                         </button>
 
+                        <div className="hidden sm:flex items-center gap-1">
+                          {pageButtons.map((p, idx) =>
+                            p === "…" ? (
+                              <span key={`dots-${idx}`} className="px-2 text-slate-400">…</span>
+                            ) : (
+                              <button
+                                key={p}
+                                onClick={() => setPage(p)}
+                                disabled={loading}
+                                className={
+                                  p === page
+                                    ? "px-3 py-2 rounded border border-sky-500 bg-sky-50 text-sm font-semibold text-sky-700"
+                                    : "px-3 py-2 rounded border border-slate-300 bg-white text-sm text-slate-600 hover:bg-slate-50"
+                                }
+                              >
+                                {p}
+                              </button>
+                            )
+                          )}
+                        </div>
+
                         <button
                           onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                           disabled={page >= totalPages || loading}
@@ -618,7 +804,7 @@ export default function OpeningScreen() {
                 </div>
 
                 <div className="mt-3 text-xs text-slate-500">
-                  Beds/Baths filters are server-side (fast) and only load 50 rows per page.
+                  Investor metrics are auto-calculated from your assumptions and update instantly.
                 </div>
               </div>
             </div>
