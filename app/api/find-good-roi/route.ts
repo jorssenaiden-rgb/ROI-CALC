@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { loadListings } from "@/lib/loadListings";
 
-/** ---------- Helpers shared by GET + POST ---------- */
-
 type PriceBucket = "any" | "200-500" | "500-1000" | "1000+";
 type SortBy = "cap" | "priceLow" | "noiHigh";
+
+const HARD_MIN_PRICE = 200000; // ✅ never show below this
 
 function num(v: any): number | null {
   if (v == null || v === "") return null;
@@ -50,7 +50,20 @@ function inPriceBucket(price: number | null, bucket: PriceBucket) {
   return true;
 }
 
-/** ---------- NEW: GET (used by OpeningScreen) ---------- */
+function parseMinIntParam(v: string | null): number | null {
+  if (!v || v === "any") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * GET /api/find-good-roi
+ * Server-side pagination + filtering for fast UI.
+ * Enforces:
+ *  - price >= 200000
+ *  - beds > 0
+ *  - baths > 0
+ */
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -64,39 +77,71 @@ export async function GET(req: Request) {
     const minCap = Number(url.searchParams.get("minCap") || "0");
     const sortBy = (url.searchParams.get("sortBy") || "cap") as SortBy;
 
+    const minBeds = parseMinIntParam(url.searchParams.get("minBeds"));
+    const minBaths = parseMinIntParam(url.searchParams.get("minBaths"));
+
     const page = Math.max(1, Number(url.searchParams.get("page") || "1"));
     const pageSize = Math.min(200, Math.max(1, Number(url.searchParams.get("pageSize") || "50")));
 
-    // Load your normalized listings (address/price/beds/etc) from lib/loadListings.ts
     const all = loadListings();
 
-    let filtered = all.filter((x: any) => {
+    // ✅ FULL options from ALL data (never shrink)
+    const provSetAll = new Set<string>();
+    const citySetAll = new Set<string>();
+    for (const x of all as any[]) {
+      const loc = parseLocation(x.address || "");
+      if (loc.province !== "Unknown") provSetAll.add(loc.province);
+      if (loc.city !== "Unknown") citySetAll.add(loc.city);
+    }
+
+    // ✅ Filter
+    let filtered = (all as any[]).filter((x) => {
       const addr = (x.address || "").toLowerCase();
       const loc = parseLocation(x.address || "");
 
+      // ✅ HARD RULES: price + beds + baths
+      const price = num(x.price);
+      if (price == null || price < HARD_MIN_PRICE) return false;
+
+      const beds = num(x.beds);
+      if (beds == null || beds <= 0) return false;
+
+      const baths = num(x.baths);
+      if (baths == null || baths <= 0) return false;
+
+      // query
       if (q && !addr.includes(q)) return false;
 
+      // location filters
       if (country !== "any" && loc.country !== country) return false;
       if (province !== "any" && loc.province !== province) return false;
       if (city !== "any" && loc.city !== city) return false;
 
-      if (!inPriceBucket(num(x.price), priceBucket)) return false;
+      // price bucket
+      if (!inPriceBucket(price, priceBucket)) return false;
 
+      // cap rate filter
       if (minCap > 0) {
         const cr = num(x.capRate);
         if (cr == null || cr < minCap) return false;
       }
 
+      // beds/baths minimums
+      if (minBeds != null && beds < minBeds) return false;
+      if (minBaths != null && baths < minBaths) return false;
+
       return true;
     });
 
-    filtered.sort((a: any, b: any) => {
+    // ✅ Sort
+    filtered.sort((a, b) => {
       if (sortBy === "cap") return (num(b.capRate) ?? -999) - (num(a.capRate) ?? -999);
       if (sortBy === "priceLow") return (num(a.price) ?? 9e18) - (num(b.price) ?? 9e18);
       if (sortBy === "noiHigh") return (num(b.noi) ?? -999) - (num(a.noi) ?? -999);
       return 0;
     });
 
+    // ✅ Pagination
     const total = filtered.length;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const safePage = Math.min(page, totalPages);
@@ -104,23 +149,16 @@ export async function GET(req: Request) {
     const start = (safePage - 1) * pageSize;
     const items = filtered.slice(start, start + pageSize);
 
-    // Dropdown options (based on filtered set)
-    const provSet = new Set<string>();
-    const citySet = new Set<string>();
-    for (const x of filtered) {
-      const loc = parseLocation(x.address || "");
-      if (loc.province !== "Unknown") provSet.add(loc.province);
-      if (loc.city !== "Unknown") citySet.add(loc.city);
-    }
-
     return NextResponse.json({
       items,
       total,
       totalPages,
       page: safePage,
       pageSize,
-      provinceOptions: Array.from(provSet).sort(),
-      cityOptions: Array.from(citySet).sort((a, b) => a.localeCompare(b)),
+
+      // full lists (never filtered)
+      provinceOptions: Array.from(provSetAll).sort(),
+      cityOptions: Array.from(citySetAll).sort((a, b) => a.localeCompare(b)),
     });
   } catch (err: any) {
     return NextResponse.json(
@@ -130,24 +168,39 @@ export async function GET(req: Request) {
   }
 }
 
-/** ---------- KEEP: POST (your older endpoint behavior) ---------- */
+/**
+ * POST /api/find-good-roi
+ * Keeps your older behavior. Also enforces:
+ *  - price >= 200000
+ *  - beds > 0
+ *  - baths > 0
+ */
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
 
-    // Keep your old params
-    const minPrice = Number(body.minPrice ?? 250000);
+    const minPriceFromUser = Number(body.minPrice ?? HARD_MIN_PRICE);
+    const minPrice = Math.max(minPriceFromUser, HARD_MIN_PRICE);
+
     const capRateMin = Number(body.capRateMin ?? 6);
     const limit = Math.min(Number(body.limit ?? 50), 200);
 
-    // This assumes your loadListings() returns the normalized objects
     const listings = loadListings();
 
-    // If your old logic depended on raw XLSX fields,
-    // you should update it to use normalized fields instead.
-    const analyzed = listings
-      .filter((r: any) => (num(r.price) ?? 0) >= minPrice)
-      .filter((r: any) => {
+    const analyzed = (listings as any[])
+      .filter((r) => {
+        const p = num(r.price);
+        if (p == null || p < minPrice) return false;
+
+        const beds = num(r.beds);
+        if (beds == null || beds <= 0) return false;
+
+        const baths = num(r.baths);
+        if (baths == null || baths <= 0) return false;
+
+        return true;
+      })
+      .filter((r) => {
         const cr = num(r.capRate);
         return cr != null && cr >= capRateMin;
       })

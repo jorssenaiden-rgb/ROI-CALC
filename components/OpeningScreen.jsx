@@ -14,32 +14,37 @@ function pct(n) {
 }
 
 export default function OpeningScreen() {
-  // ---------- HERO SELECTIONS (UI only; options never filtered) ----------
+  // HERO selections (options never filtered)
   const [heroCountry, setHeroCountry] = useState("Canada");
   const [heroProvince, setHeroProvince] = useState("any");
   const [heroCity, setHeroCity] = useState("any");
 
-  // ---------- ACTIVE FILTERS (sent to API) ----------
+  // Active filters (sent to API)
   const [query, setQuery] = useState("");
   const [country, setCountry] = useState("any");
   const [province, setProvince] = useState("any");
   const [city, setCity] = useState("any");
+
   const [priceBucket, setPriceBucket] = useState("any");
   const [minCap, setMinCap] = useState(0);
   const [sortBy, setSortBy] = useState("cap");
 
-  // ---------- PAGINATION ----------
+  // ✅ NEW: Beds/Baths dropdown filters (minimum)
+  const [minBeds, setMinBeds] = useState("any");   // "any" | "0" | "1" | ... | "5"
+  const [minBaths, setMinBaths] = useState("any"); // "any" | "0" | "1" | ... | "5"
+
+  // Pagination
   const [page, setPage] = useState(1);
   const pageSize = 50;
 
-  // ---------- DATA (only 50 rows) ----------
+  // Server results (50 rows only)
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // ---------- FULL OPTION LISTS (NEVER filtered by selection) ----------
+  // Full option lists (never filtered by selection)
   const [provinceOptions, setProvinceOptions] = useState([]);
   const [cityOptions, setCityOptions] = useState([]);
 
@@ -49,7 +54,6 @@ export default function OpeningScreen() {
 
   // Plotly
   const plotReadyRef = useRef(false);
-
   const initOrUpdatePlotly = useCallback((capRates) => {
     const Plotly = typeof window !== "undefined" ? window.Plotly : null;
     if (!Plotly) return;
@@ -102,20 +106,14 @@ export default function OpeningScreen() {
     };
   }, []);
 
-  // ---------- HERO HANDLERS (fix stuck dropdowns) ----------
+  // Hero handlers (never “stuck”)
   const onHeroProvinceChange = (e) => {
-    const nextProv = e.target.value;
-    setHeroProvince(nextProv);
-
-    // reset selection only (options stay full)
-    setHeroCity("any");
+    setHeroProvince(e.target.value);
+    setHeroCity("any"); // reset city selection, but options stay full
   };
+  const onHeroCityChange = (e) => setHeroCity(e.target.value);
 
-  const onHeroCityChange = (e) => {
-    setHeroCity(e.target.value);
-  };
-
-  // ---------- FETCH PAGE (only 50 rows) ----------
+  // Fetch only current page
   const fetchPage = useCallback(async () => {
     setLoading(true);
     setErrorMsg("");
@@ -131,26 +129,27 @@ export default function OpeningScreen() {
         sortBy,
         page: String(page),
         pageSize: String(pageSize),
+
+        // ✅ NEW
+        minBeds,
+        minBaths,
       });
 
       const res = await fetch(`/api/find-good-roi?${params.toString()}`);
-
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`API ${res.status}: ${text}`);
       }
-
       const data = await res.json();
 
       setItems(data.items || []);
       setTotal(Number(data.total || 0));
       setTotalPages(Number(data.totalPages || 1));
 
-      // ✅ IMPORTANT: options should be FULL LISTS (not filtered)
+      // options should remain full lists
       if (Array.isArray(data.provinceOptions)) setProvinceOptions(data.provinceOptions);
       if (Array.isArray(data.cityOptions)) setCityOptions(data.cityOptions);
 
-      // if server clamps page
       if (data.page && Number(data.page) !== page) setPage(Number(data.page));
     } catch (err) {
       setItems([]);
@@ -160,30 +159,41 @@ export default function OpeningScreen() {
     } finally {
       setLoading(false);
     }
-  }, [query, country, province, city, priceBucket, minCap, sortBy, page, pageSize]);
+  }, [
+    query,
+    country,
+    province,
+    city,
+    priceBucket,
+    minCap,
+    sortBy,
+    page,
+    pageSize,
+    minBeds,
+    minBaths,
+  ]);
 
-  // load new data when page/filters change
   useEffect(() => {
     fetchPage();
   }, [fetchPage]);
 
-  // reset page when filters change
+  // Reset to page 1 when any filter changes
   useEffect(() => {
     setPage(1);
-  }, [query, country, province, city, priceBucket, minCap, sortBy]);
+  }, [query, country, province, city, priceBucket, minCap, sortBy, minBeds, minBaths]);
 
-  // scroll to table on page change
+  // Scroll to table top on page change
   useEffect(() => {
     tableTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [page]);
 
-  // plotly from current page
+  // Update plotly using current page
   useEffect(() => {
     const capRates = items.map((x) => x?.capRate).filter((v) => v != null);
     initOrUpdatePlotly(capRates);
   }, [items, initOrUpdatePlotly]);
 
-  // page buttons
+  // Pagination buttons with ellipses
   const pageButtons = useMemo(() => {
     const pages = new Set([1, totalPages, page - 2, page - 1, page, page + 1, page + 2]);
     const arr = Array.from(pages)
@@ -200,7 +210,7 @@ export default function OpeningScreen() {
     return out;
   }, [page, totalPages]);
 
-  // apply hero → active filters
+  // Apply hero → active filters
   const onAnalyzeMarket = () => {
     setCountry(heroCountry || "any");
     setProvince(heroProvince);
@@ -212,7 +222,6 @@ export default function OpeningScreen() {
     }, 50);
   };
 
-  // clear everything
   const onClear = () => {
     setHeroCountry("Canada");
     setHeroProvince("any");
@@ -225,6 +234,8 @@ export default function OpeningScreen() {
     setPriceBucket("any");
     setMinCap(0);
     setSortBy("cap");
+    setMinBeds("any");
+    setMinBaths("any");
     setPage(1);
   };
 
@@ -402,7 +413,47 @@ export default function OpeningScreen() {
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <label className="text-xs font-medium text-slate-600 whitespace-nowrap">Price:</label>
+                        <label className="text-xs font-medium text-slate-600 whitespace-nowrap">
+                          Beds:
+                        </label>
+                        <select
+                          value={minBeds}
+                          onChange={(e) => setMinBeds(e.target.value)}
+                          className="py-2 pl-2 pr-6 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-700"
+                        >
+                          <option value="any">Any</option>
+                          <option value="0">0+</option>
+                          <option value="1">1+</option>
+                          <option value="2">2+</option>
+                          <option value="3">3+</option>
+                          <option value="4">4+</option>
+                          <option value="5">5+</option>
+                        </select>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs font-medium text-slate-600 whitespace-nowrap">
+                          Baths:
+                        </label>
+                        <select
+                          value={minBaths}
+                          onChange={(e) => setMinBaths(e.target.value)}
+                          className="py-2 pl-2 pr-6 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium text-slate-700"
+                        >
+                          <option value="any">Any</option>
+                          <option value="0">0+</option>
+                          <option value="1">1+</option>
+                          <option value="2">2+</option>
+                          <option value="3">3+</option>
+                          <option value="4">4+</option>
+                          <option value="5">5+</option>
+                        </select>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs font-medium text-slate-600 whitespace-nowrap">
+                          Price:
+                        </label>
                         <select
                           value={priceBucket}
                           onChange={(e) => setPriceBucket(e.target.value)}
@@ -416,7 +467,9 @@ export default function OpeningScreen() {
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <label className="text-xs font-medium text-slate-600 whitespace-nowrap">Min Cap:</label>
+                        <label className="text-xs font-medium text-slate-600 whitespace-nowrap">
+                          Min Cap:
+                        </label>
                         <select
                           value={String(minCap)}
                           onChange={(e) => setMinCap(Number(e.target.value))}
@@ -476,12 +529,18 @@ export default function OpeningScreen() {
                         {items.map((x, idx) => (
                           <tr key={x.id ?? idx} className="hover:bg-sky-50/30 transition-colors">
                             <td className="p-4">
-                              <div className="text-sm font-bold text-slate-800">{x.address || "Unknown address"}</div>
-                              <div className="text-xs text-slate-500">{x.sqft ? `${x.sqft} sqft` : "—"}</div>
+                              <div className="text-sm font-bold text-slate-800">
+                                {x.address || "Unknown address"}
+                              </div>
+                              <div className="text-xs text-slate-500">
+                                {x.sqft ? `${x.sqft} sqft` : "—"}
+                              </div>
                             </td>
+
                             <td className="p-4 text-right">
                               <div className="text-sm font-bold text-slate-800">{money(x.price)}</div>
                             </td>
+
                             <td className="p-4 text-center">
                               <div className="text-xs font-medium text-slate-600">
                                 {x.beds != null ? `${x.beds} Beds` : "—"}
@@ -490,12 +549,15 @@ export default function OpeningScreen() {
                                 {x.baths != null ? `${x.baths} Baths` : "—"}
                               </div>
                             </td>
+
                             <td className="p-4 text-right">
                               <div className="text-sm text-slate-700">{money(x.estRent)}</div>
                             </td>
+
                             <td className="p-4 text-right">
                               <div className="text-sm text-slate-700">{money(x.noi)}</div>
                             </td>
+
                             <td className="p-4 text-right">
                               {x.capRate != null ? (
                                 <div className="inline-flex items-center px-2.5 py-0.5 rounded-full text-sm font-bold bg-green-100 text-green-800">
@@ -519,7 +581,7 @@ export default function OpeningScreen() {
                     </table>
                   </div>
 
-                  {/* PAGINATION */}
+                  {/* Pagination */}
                   <div className="bg-white px-4 py-3 border-t border-slate-200 flex items-center justify-between sm:px-6">
                     <div className="flex-1 flex items-center justify-between gap-4">
                       <div className="text-sm text-slate-700">
@@ -543,27 +605,6 @@ export default function OpeningScreen() {
                           <i className="fa-solid fa-chevron-left" /> Prev
                         </button>
 
-                        <div className="hidden sm:flex items-center gap-1">
-                          {pageButtons.map((p, idx) =>
-                            p === "…" ? (
-                              <span key={`dots-${idx}`} className="px-2 text-slate-400">…</span>
-                            ) : (
-                              <button
-                                key={p}
-                                onClick={() => setPage(p)}
-                                disabled={loading}
-                                className={
-                                  p === page
-                                    ? "px-3 py-2 rounded border border-sky-500 bg-sky-50 text-sm font-semibold text-sky-700"
-                                    : "px-3 py-2 rounded border border-slate-300 bg-white text-sm text-slate-600 hover:bg-slate-50"
-                                }
-                              >
-                                {p}
-                              </button>
-                            )
-                          )}
-                        </div>
-
                         <button
                           onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                           disabled={page >= totalPages || loading}
@@ -574,11 +615,10 @@ export default function OpeningScreen() {
                       </div>
                     </div>
                   </div>
-
                 </div>
 
                 <div className="mt-3 text-xs text-slate-500">
-                  ✅ Dropdown options always stay full (never filtered after selection).
+                  Beds/Baths filters are server-side (fast) and only load 50 rows per page.
                 </div>
               </div>
             </div>
